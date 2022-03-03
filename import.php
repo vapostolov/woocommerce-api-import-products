@@ -1,6 +1,7 @@
 <?php
 
 define( 'FILE_TO_IMPORT', 'products.json' );
+define( 'CATEGORIES_FILE_TO_IMPORT', 'categories.json' );
 
 require __DIR__ . '/vendor/autoload.php';
 
@@ -11,13 +12,18 @@ if ( ! file_exists( FILE_TO_IMPORT ) ) :
 	die( 'Unable to find ' . FILE_TO_IMPORT );
 endif;	
 
+if ( ! file_exists( CATEGORIES_FILE_TO_IMPORT ) ) :
+	die( 'Unable to find ' . CATEGORIES_FILE_TO_IMPORT );
+endif;	
+
 $woocommerce = new Client(
-    'https://www.yourwebsiteurl.com',
-    'ck_5123315599341b68523df54ffb981ba22eeceb96', 
-    'cs_029e026ff8213972039208093aeea6e07cc20a57',
+    'https://masterfishing.rightleftbrains.com',
+    'ck_fbc54857d4a9908fb962968849aff21458a000eb', 
+    'cs_45108c85d130a7186fe05c7c16ed41ba47c077f2',
     [
         'wp_api' => true,
         'version' => 'wc/v2',
+        'timeout' => '50',
        // 'query_string_auth' => true
     ]
 );
@@ -25,6 +31,45 @@ $woocommerce = new Client(
 try {
 
 	$json = parse_json( FILE_TO_IMPORT );
+	$categories_json = parse_json( CATEGORIES_FILE_TO_IMPORT );
+
+	// Import Categories
+	$wc_categories = $woocommerce->get('products/categories', array("per_page" => 100,));
+	foreach ($categories_json as $category) :
+		$i = array_search((string) $category['slug'], array_column($wc_categories, 'slug'));
+		$category_data = array(
+			'name' => (string) $category['name'],
+			'slug' => (string) $category['slug'],
+		);
+
+		if ($category['parent'] !== null) :
+			foreach ($wc_categories as $k => $v) {
+				if (strpos($v->slug, (string) $category['parent'] . "-") === 0) :
+					$category_data['parent'] = $v->id;
+				endif;
+			}
+		endif;
+
+		if ($i === false) :
+			$wc_category = (array) $woocommerce->post('products/categories', $category_data);
+			$wc_categories = $woocommerce->get('products/categories', array("per_page" => 100,));
+			status_message('Category added. ID: ' . $wc_category['id']);
+		else :
+			$wc_category = (array) $woocommerce->post('products/categories/' . $wc_categories[$i]->id, $category_data);
+			status_message('Category updated. ID: ' . $wc_category['id']);
+		endif;
+	endforeach;
+
+	// Import Categories
+	$wc_categories = $woocommerce->get('products/categories', array("per_page" => 100,));
+	$categories = get_categories_from_json( $json );
+	foreach ( $categories as $category => $wc_category ) :
+		foreach ($wc_categories as $k => $v) {
+			if (strpos($v->slug, (string) $category . "-") === 0) :
+				$categories[$category] = $v->id;
+			endif;
+		}
+	endforeach;
 
 	// Import Attributes
 	foreach ( get_attributes_from_json( $json ) as $product_attribute_name => $product_attribute ) :
@@ -37,7 +82,7 @@ try {
 		    'has_archives' => true
 		);
 
-		$wc_attribute = $woocommerce->post( 'products/attributes', $attribute_data );
+		$wc_attribute = (array) $woocommerce->post( 'products/attributes', $attribute_data );
 
 		if ( $wc_attribute ) :
 			status_message( 'Attribute added. ID: '. $wc_attribute['id'] );
@@ -52,7 +97,7 @@ try {
 					'name' => $term
 				);
 
-				$wc_attribute_term = $woocommerce->post( 'products/attributes/'. $wc_attribute['id'] .'/terms', $attribute_term_data );
+				$wc_attribute_term = (array) $woocommerce->post( 'products/attributes/'. $wc_attribute['id'] .'/terms', $attribute_term_data );
 
 				if ( $wc_attribute_term ) :
 					status_message( 'Attribute term added. ID: '. $wc_attribute['id'] );
@@ -68,33 +113,44 @@ try {
 	endforeach;
 
 
-	$data = get_products_and_variations_from_json( $json, $added_attributes );
+	$data = get_products_and_variations_from_json( $json, $added_attributes, $categories );
 
 	// Merge products and product variations so that we can loop through products, then its variations
 	$product_data = merge_products_and_variations( $data['products'], $data['product_variations'] );
 
 	// Import: Products
-	foreach ( $product_data as $k => $product ) :
+	foreach ( array_reverse($product_data) as $k => $product ) :
 
 		if ( isset( $product['variations'] ) ) :
 			$_product_variations = $product['variations']; // temporary store variations array
 
 			// Unset and make the $product data correct for importing the product.
 			unset($product['variations']);
-		endif;		
+		endif;
 
-			$wc_product = $woocommerce->post( 'products', $product );
+		$wc_product = (array) $woocommerce->get('products', array("sku" => $product['sku'],));
 
-			if ( $wc_product ) :
-				status_message( 'Product added. ID: '. $wc_product['id'] );
+		if ($wc_product) :
+			$wc_product_values = array_values($wc_product);
+			$wc_product = (array) array_shift($wc_product_values);
+			$wc_product = (array) $woocommerce->put('products/' . $wc_product['id'], $product);
+			if ($wc_product) :
+				status_message('Product updated. ID: ' . $wc_product['id']);
 			endif;
+		else :
+			$wc_product = (array) $woocommerce->post('products', $product);
+
+			if ($wc_product) :
+				status_message('Product added. ID: ' . $wc_product['id']);
+			endif;
+		endif;
 
 		if ( isset( $_product_variations ) ) :
 			// Import: Product variations
 
 			// Loop through our temporary stored product variations array and add them
 			foreach ( $_product_variations as $variation ) :
-				$wc_variation = $woocommerce->post( 'products/'. $wc_product['id'] .'/variations', $variation );
+				$wc_variation = (array) $woocommerce->post( 'products/'. $wc_product['id'] .'/variations', $variation );
 
 				if ( $wc_variation ) :
 					status_message( 'Product variation added. ID: '. $wc_variation['id'] . ' for product ID: ' . $wc_product['id'] );
@@ -147,7 +203,7 @@ function merge_products_and_variations( $product_data = array(), $product_variat
  * @param  array $added_attributes
  * @return array
 */
-function get_products_and_variations_from_json( $json, $added_attributes ) {
+function get_products_and_variations_from_json( $json, $added_attributes, $categories ) {
 
 	$product = array();
 	$product_variations = array();
@@ -160,6 +216,12 @@ function get_products_and_variations_from_json( $json, $added_attributes ) {
 			$product[$key]['name'] = (string) $pre_product['name'];
 			$product[$key]['description'] = (string) $pre_product['description'];
 			$product[$key]['regular_price'] = (string) $pre_product['regular_price'];
+			$product[$key]['sku'] = (string) $pre_product['sku'];
+			$product[$key]['categories'] = [
+				[
+					'id' => $categories[$pre_product['category']]
+				]
+			];
 
 			// Stock
 			$product[$key]['manage_stock'] = (bool) $pre_product['manage_stock'];
@@ -179,6 +241,12 @@ function get_products_and_variations_from_json( $json, $added_attributes ) {
 			$product[$key]['name'] = (string) $pre_product['name'];
 			$product[$key]['description'] = (string) $pre_product['description'];
 			$product[$key]['regular_price'] = (string) $pre_product['regular_price'];
+			$product[$key]['sku'] = (string) $pre_product['sku'];
+			$product[$key]['categories'] = [
+				[
+					'id' => $categories[$pre_product['category']]
+				]
+			];
 
 			// Stock
 			$product[$key]['manage_stock'] = (bool) $pre_product['manage_stock'];
@@ -255,6 +323,26 @@ function get_attributes_from_json( $json ) {
 	endforeach;		
 
 	return $product_attributes;
+
+}	
+
+/**
+ * Get categories from JSON.
+ * Used to import product categories.
+ *
+ * @param  array $json
+ * @return array
+*/
+function get_categories_from_json( $json ) {
+	$product_categories = array();
+
+	foreach( $json as $key => $pre_product ) :
+		if ( !empty( $pre_product['category'] ) ) :
+			$product_categories[$pre_product['category']] = null;
+		endif;
+	endforeach;		
+
+	return $product_categories;
 
 }
 
