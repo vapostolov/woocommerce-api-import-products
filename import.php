@@ -7,6 +7,15 @@ require __DIR__ . '/vendor/autoload.php';
 
 use Automattic\WooCommerce\Client;
 use Automattic\WooCommerce\HttpClient\HttpClientException;
+use Monolog\Logger;
+use Monolog\Handler\StreamHandler;
+
+// Create the logger
+$logger = new Logger('masterfishing_logger');
+// Now add some handlers
+$logger->pushHandler(new StreamHandler(__DIR__.'/masterfishing_app.log', Logger::DEBUG));
+
+$db = new SQLite3('zeron.sqlite', SQLITE3_OPEN_CREATE | SQLITE3_OPEN_READWRITE);
 
 if ( ! file_exists( FILE_TO_IMPORT ) ) :
 	die( 'Unable to find ' . FILE_TO_IMPORT );
@@ -31,7 +40,8 @@ $woocommerce = new Client(
 try {
 
 	$json = parse_json( FILE_TO_IMPORT );
-	$categories_json = parse_json( CATEGORIES_FILE_TO_IMPORT );
+//	$categories_json = parse_json( CATEGORIES_FILE_TO_IMPORT );
+	$categories_json = [];
 
 	// Import Categories
 	$wc_categories = $woocommerce->get('products/categories', array("per_page" => 100,));
@@ -119,7 +129,7 @@ try {
 	$product_data = merge_products_and_variations( $data['products'], $data['product_variations'] );
 
 	// Import: Products
-	foreach ( array_reverse($product_data) as $k => $product ) :
+	foreach ( $product_data as $k => $product ) :
 
 		if ( isset( $product['variations'] ) ) :
 			$_product_variations = $product['variations']; // temporary store variations array
@@ -127,21 +137,37 @@ try {
 			// Unset and make the $product data correct for importing the product.
 			unset($product['variations']);
 		endif;
+                $query = 'SELECT "wc_last_update_attempt", "wc_updated" FROM "products" WHERE "product_id" = \'' .
+                    SQLite3::escapeString($product['sku']) .
+                    '\' ORDER BY "id" DESC LIMIT 1';
+
+                $status = $db->querySingle($query, true);
+                
+                if (!is_null($status["wc_last_update_attempt"]) || !is_null($status["wc_updated"])) :
+                    continue;
+                endif;
 
 		$wc_product = (array) $woocommerce->get('products', array("sku" => $product['sku'],));
+                status_message('Product is being processed. SKU: ' . $product['sku'], $logger);
+                $statement = $db->prepare('UPDATE "products" SET
+                    "wc_last_update_attempt"=:wc_last_update_attempt
+                    WHERE "product_id"=:pid');
+                $statement->bindValue(':pid', $product['sku']);
+                $statement->bindValue(':wc_last_update_attempt', date('Y-m-d H:i:s'));
+                $statement->execute();
 
 		if ($wc_product) :
 			$wc_product_values = array_values($wc_product);
 			$wc_product = (array) array_shift($wc_product_values);
 			$wc_product = (array) $woocommerce->put('products/' . $wc_product['id'], $product);
 			if ($wc_product) :
-				status_message('Product updated. ID: ' . $wc_product['id']);
+				status_message('Product updated. ID: ' . $wc_product['id'], $logger);
 			endif;
 		else :
 			$wc_product = (array) $woocommerce->post('products', $product);
 
 			if ($wc_product) :
-				status_message('Product added. ID: ' . $wc_product['id']);
+				status_message('Product added. ID: ' . $wc_product['id'], $logger);
 			endif;
 		endif;
 
@@ -160,12 +186,20 @@ try {
 			// Don't need it anymore
 			unset($_product_variations);
 		endif;
+                $statement = $db->prepare('UPDATE "products" SET
+                    "wc_last_update_attempt"=:wc_last_update_attempt,"wc_updated"=:wc_updated
+                    WHERE "product_id"=:pid');
+                $statement->bindValue(':pid', $product['sku']);
+                $statement->bindValue(':wc_last_update_attempt', date('Y-m-d H:i:s'));
+                $statement->bindValue(':wc_updated', true);
+                $statement->execute();
 
 	endforeach;
 	
 
 } catch ( HttpClientException $e ) {
     echo $e->getMessage(); // Error message
+    status_message($e->getMessage(), $logger, 'ERROR');
 }
 
 /**
@@ -367,8 +401,20 @@ function parse_json( $file ) {
  * Print status message.
  *
  * @param  string $message
+ * @param  object $logger
+ * @param  string $log_level
  * @return string
-*/
-function status_message( $message ) {
-	echo $message . "\r\n";
+ */
+function status_message($message, $logger = null, $log_level = null) {
+    echo $message . "\r\n";
+
+    if (!is_null($logger)) :
+        switch ($log_level) {
+            case "ERROR":
+                $logger->error($message);
+                break;
+            default:
+                $logger->info($message);
+        }
+    endif;
 }
